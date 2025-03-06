@@ -1,0 +1,488 @@
+#!/usr/bin/env bash
+
+# cloud - A tool for managing multi-service projects
+# Author: https://github.com/this-is-allan
+# Version: 1.0.0
+
+set -e
+
+# Configuration
+CONFIG_DIR="$HOME/.cloud"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+
+# Check dependencies
+check_dependencies() {
+  local missing_deps=()
+  
+  if ! command -v tmux &> /dev/null; then
+    missing_deps+=("tmux")
+  fi
+  
+  if ! command -v jq &> /dev/null; then
+    missing_deps+=("jq")
+  fi
+  
+  if [ ${#missing_deps[@]} -ne 0 ]; then
+    echo "Error: Missing dependencies: ${missing_deps[*]}"
+    echo "Please install them using:"
+    echo "  brew install ${missing_deps[*]}"
+    exit 1
+  fi
+}
+
+# Initialize configuration
+init_config() {
+  if [ ! -d "$CONFIG_DIR" ]; then
+    mkdir -p "$CONFIG_DIR"
+  fi
+  
+  if [ ! -f "$CONFIG_FILE" ]; then
+    echo '{"projects": {}}' > "$CONFIG_FILE"
+  fi
+}
+
+# List all projects
+list_projects() {
+  echo "📋 Available Projects:"
+  echo ""
+  
+  if [ "$(jq '.projects | length' "$CONFIG_FILE")" -eq 0 ]; then
+    echo "  No projects found. Create one with 'cloud new <project-name>'."
+    return
+  fi
+  
+  jq -r '.projects | keys[] as $k | "  \($k) - \(.[$k].services | length) service(s)"' "$CONFIG_FILE"
+}
+
+# Create a new project
+create_project() {
+  local project_name="$1"
+  
+  if [ -z "$project_name" ]; then
+    echo "Error: Project name is required."
+    echo "Usage: cloud new <project-name>"
+    exit 1
+  fi
+  
+  # Check if project already exists
+  if jq -e ".projects[\"$project_name\"]" "$CONFIG_FILE" > /dev/null 2>&1; then
+    echo "Error: Project '$project_name' already exists."
+    exit 1
+  fi
+  
+  echo "Creating new project: $project_name"
+  echo -n "Enter project path: "
+  read -r project_path
+  
+  # Validate path exists
+  if [ ! -d "$project_path" ]; then
+    echo "Warning: Directory '$project_path' does not exist."
+    echo -n "Do you want to continue anyway? (y/n): "
+    read -r confirm
+    if [ "$confirm" != "y" ]; then
+      echo "Project creation canceled."
+      exit 0
+    fi
+  fi
+  
+  # Add project to configuration
+  jq --arg name "$project_name" --arg path "$project_path" \
+    '.projects[$name] = {"path": $path, "services": {}}' "$CONFIG_FILE" > "$CONFIG_FILE.tmp"
+  mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+  
+  echo "Project '$project_name' created successfully."
+  echo "Now add services using: cloud service-add $project_name"
+}
+
+# List services for a project
+list_services() {
+  local project_name="$1"
+  
+  if [ -z "$project_name" ]; then
+    echo "Error: Project name is required."
+    echo "Usage: cloud services <project-name>"
+    exit 1
+  fi
+  
+  # Check if project exists
+  if ! jq -e ".projects[\"$project_name\"]" "$CONFIG_FILE" > /dev/null 2>&1; then
+    echo "Error: Project '$project_name' does not exist."
+    exit 1
+  fi
+  
+  echo "🔧 Services for project '$project_name':"
+  echo ""
+  
+  if [ "$(jq -r ".projects[\"$project_name\"].services | length" "$CONFIG_FILE")" -eq 0 ]; then
+    echo "  No services found. Add one with 'cloud service-add $project_name'."
+    return
+  fi
+  
+  jq -r ".projects[\"$project_name\"].services | keys[] as \$k | \"  \(\$k):\\n    Command: \(.[\$k].command)\\n    Directory: \(.[\$k].directory)\\n\"" "$CONFIG_FILE"
+}
+
+# Add a service to a project
+add_service() {
+  local project_name="$1"
+  
+  if [ -z "$project_name" ]; then
+    echo "Error: Project name is required."
+    echo "Usage: cloud service-add <project-name>"
+    exit 1
+  fi
+  
+  # Check if project exists
+  if ! jq -e ".projects[\"$project_name\"]" "$CONFIG_FILE" > /dev/null 2>&1; then
+    echo "Error: Project '$project_name' does not exist."
+    exit 1
+  fi
+  
+  echo "Adding service to project: $project_name"
+  
+  echo -n "Enter service name: "
+  read -r service_name
+  
+  # Check if service already exists
+  if jq -e ".projects[\"$project_name\"].services[\"$service_name\"]" "$CONFIG_FILE" > /dev/null 2>&1; then
+    echo "Error: Service '$service_name' already exists in project '$project_name'."
+    exit 1
+  fi
+  
+  echo -n "Enter service command: "
+  read -r service_command
+  
+  local project_path
+  project_path="$(jq -r ".projects[\"$project_name\"].path" "$CONFIG_FILE")"
+  
+  echo -n "Enter service directory (press Enter to use project path '$project_path'): "
+  read -r service_dir
+  
+  if [ -z "$service_dir" ]; then
+    service_dir="$project_path"
+  fi
+  
+  # Validate directory exists
+  if [ ! -d "$service_dir" ]; then
+    echo "Warning: Directory '$service_dir' does not exist."
+    echo -n "Do you want to continue anyway? (y/n): "
+    read -r confirm
+    if [ "$confirm" != "y" ]; then
+      echo "Service creation canceled."
+      exit 0
+    fi
+  fi
+  
+  # Add service to configuration
+  jq --arg pname "$project_name" --arg sname "$service_name" \
+    --arg cmd "$service_command" --arg dir "$service_dir" \
+    '.projects[$pname].services[$sname] = {"command": $cmd, "directory": $dir}' "$CONFIG_FILE" > "$CONFIG_FILE.tmp"
+  mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+  
+  echo "Service '$service_name' added to project '$project_name' successfully."
+}
+
+# Remove a service from a project
+remove_service() {
+  local project_service="$1"
+  
+  if [ -z "$project_service" ]; then
+    echo "Error: Project and service specification is required."
+    echo "Usage: cloud service-remove <project>:<service>"
+    exit 1
+  fi
+  
+  # Parse project:service format
+  IFS=':' read -r project_name service_name <<< "$project_service"
+  
+  if [ -z "$project_name" ] || [ -z "$service_name" ]; then
+    echo "Error: Invalid format. Use <project>:<service>"
+    exit 1
+  fi
+  
+  # Check if project exists
+  if ! jq -e ".projects[\"$project_name\"]" "$CONFIG_FILE" > /dev/null 2>&1; then
+    echo "Error: Project '$project_name' does not exist."
+    exit 1
+  fi
+  
+  # Check if service exists
+  if ! jq -e ".projects[\"$project_name\"].services[\"$service_name\"]" "$CONFIG_FILE" > /dev/null 2>&1; then
+    echo "Error: Service '$service_name' does not exist in project '$project_name'."
+    exit 1
+  fi
+  
+  echo -n "Are you sure you want to remove service '$service_name' from project '$project_name'? (y/n): "
+  read -r confirm
+  
+  if [ "$confirm" != "y" ]; then
+    echo "Service removal canceled."
+    exit 0
+  fi
+  
+  # Remove service from configuration
+  jq --arg pname "$project_name" --arg sname "$service_name" \
+    'del(.projects[$pname].services[$sname])' "$CONFIG_FILE" > "$CONFIG_FILE.tmp"
+  mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+  
+  echo "Service '$service_name' removed from project '$project_name' successfully."
+}
+
+# Edit a service
+edit_service() {
+  local project_service="$1"
+  
+  if [ -z "$project_service" ]; then
+    echo "Error: Project and service specification is required."
+    echo "Usage: cloud service-edit <project>:<service>"
+    exit 1
+  fi
+  
+  # Parse project:service format
+  IFS=':' read -r project_name service_name <<< "$project_service"
+  
+  if [ -z "$project_name" ] || [ -z "$service_name" ]; then
+    echo "Error: Invalid format. Use <project>:<service>"
+    exit 1
+  fi
+  
+  # Check if project exists
+  if ! jq -e ".projects[\"$project_name\"]" "$CONFIG_FILE" > /dev/null 2>&1; then
+    echo "Error: Project '$project_name' does not exist."
+    exit 1
+  fi
+  
+  # Check if service exists
+  if ! jq -e ".projects[\"$project_name\"].services[\"$service_name\"]" "$CONFIG_FILE" > /dev/null 2>&1; then
+    echo "Error: Service '$service_name' does not exist in project '$project_name'."
+    exit 1
+  fi
+  
+  local current_command
+  current_command="$(jq -r ".projects[\"$project_name\"].services[\"$service_name\"].command" "$CONFIG_FILE")"
+  
+  local current_directory
+  current_directory="$(jq -r ".projects[\"$project_name\"].services[\"$service_name\"].directory" "$CONFIG_FILE")"
+  
+  echo "Editing service '$service_name' in project '$project_name'"
+  echo "Current command: $current_command"
+  echo -n "Enter new command (press Enter to keep current): "
+  read -r new_command
+  
+  if [ -z "$new_command" ]; then
+    new_command="$current_command"
+  fi
+  
+  echo "Current directory: $current_directory"
+  echo -n "Enter new directory (press Enter to keep current): "
+  read -r new_directory
+  
+  if [ -z "$new_directory" ]; then
+    new_directory="$current_directory"
+  else
+    # Validate new directory exists
+    if [ ! -d "$new_directory" ]; then
+      echo "Warning: Directory '$new_directory' does not exist."
+      echo -n "Do you want to continue anyway? (y/n): "
+      read -r confirm
+      if [ "$confirm" != "y" ]; then
+        echo "Service edit canceled."
+        exit 0
+      fi
+    fi
+  fi
+  
+  # Update service in configuration
+  jq --arg pname "$project_name" --arg sname "$service_name" \
+    --arg cmd "$new_command" --arg dir "$new_directory" \
+    '.projects[$pname].services[$sname] = {"command": $cmd, "directory": $dir}' "$CONFIG_FILE" > "$CONFIG_FILE.tmp"
+  mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+  
+  echo "Service '$service_name' in project '$project_name' updated successfully."
+}
+
+# Run a project or specific services
+run_project() {
+  local project_name="$1"
+  shift
+  local specific_services=("$@")
+  
+  if [ -z "$project_name" ]; then
+    echo "Error: Project name is required."
+    echo "Usage: cloud run <project-name> [<project>:<service> ...]"
+    exit 1
+  fi
+  
+  # Check if project exists
+  if ! jq -e ".projects[\"$project_name\"]" "$CONFIG_FILE" > /dev/null 2>&1; then
+    echo "Error: Project '$project_name' does not exist."
+    exit 1
+  fi
+
+  # If we're already in a tmux session, warn the user
+  if [ -n "$TMUX" ]; then
+    echo "Warning: You are already in a tmux session."
+    echo -n "Do you want to create a nested session? (y/n): "
+    read -r confirm
+    if [ "$confirm" != "y" ]; then
+      echo "Run canceled."
+      exit 0
+    fi
+  fi
+  
+  local session_name="cloud-$project_name"
+  
+  # Kill existing tmux session if it exists
+  tmux kill-session -t "$session_name" 2>/dev/null || true
+  
+  # Create a new tmux session
+  tmux new-session -d -s "$session_name"
+  
+  # Get all services or use specified ones
+  local services
+  if [ ${#specific_services[@]} -eq 0 ]; then
+    # Use all services from the project
+    services=($(jq -r ".projects[\"$project_name\"].services | keys[]" "$CONFIG_FILE"))
+  else
+    # Parse project:service format for each specified service
+    services=()
+    for spec in "${specific_services[@]}"; do
+      IFS=':' read -r p s <<< "$spec"
+      # If no project specified or matches current project
+      if [ -z "$p" ] || [ "$p" = "$project_name" ]; then
+        # Check if service exists
+        if jq -e ".projects[\"$project_name\"].services[\"$s\"]" "$CONFIG_FILE" > /dev/null 2>&1; then
+          services+=("$s")
+        else
+          echo "Warning: Service '$s' does not exist in project '$project_name'. Skipping."
+        fi
+      fi
+    done
+  fi
+  
+  if [ ${#services[@]} -eq 0 ]; then
+    echo "Error: No services to run for project '$project_name'."
+    tmux kill-session -t "$session_name" 2>/dev/null || true
+    exit 1
+  fi
+  
+  # Configure tmux panes based on number of services
+  local num_services=${#services[@]}
+  local pane_counter=0
+  
+  # For the first service, use the initial pane
+  local service="${services[0]}"
+  local command
+  command="$(jq -r ".projects[\"$project_name\"].services[\"$service\"].command" "$CONFIG_FILE")"
+  local directory
+  directory="$(jq -r ".projects[\"$project_name\"].services[\"$service\"].directory" "$CONFIG_FILE")"
+  
+  # Set the window title
+  tmux rename-window -t "$session_name:0" "$service"
+  
+  # Send commands to the first pane
+  tmux send-keys -t "$session_name:0.0" "cd \"$directory\" && clear && echo \"🚀 Starting service: $service\" && echo \"📁 Directory: $directory\" && echo \"🔧 Command: $command\" && echo \"\" && $command" C-m
+  
+  # Create additional panes for other services
+  for ((i=1; i<num_services; i++)); do
+    service="${services[$i]}"
+    command="$(jq -r ".projects[\"$project_name\"].services[\"$service\"].command" "$CONFIG_FILE")"
+    directory="$(jq -r ".projects[\"$project_name\"].services[\"$service\"].directory" "$CONFIG_FILE")"
+    
+    # Create a new pane
+    if [ "$((i % 2))" -eq 1 ]; then
+      # Split horizontally for odd-indexed services
+      tmux split-window -h -t "$session_name:0"
+    else
+      # Split vertically for even-indexed services
+      tmux split-window -v -t "$session_name:0"
+    fi
+    
+    # Send commands to the new pane
+    tmux send-keys -t "$session_name:0.$i" "cd \"$directory\" && clear && echo \"🚀 Starting service: $service\" && echo \"📁 Directory: $directory\" && echo \"🔧 Command: $command\" && echo \"\" && $command" C-m
+  done
+  
+  # Auto-arrange panes in tiled layout
+  tmux select-layout -t "$session_name:0" tiled
+  
+  # Add a help window
+  tmux new-window -t "$session_name:1" -n "Help"
+  tmux send-keys -t "$session_name:1" "echo -e \"\\n🌟 Cloud Project Manager - $project_name\\n\\nActive services:\\n\"; " C-m
+  
+  for service in "${services[@]}"; do
+    command="$(jq -r ".projects[\"$project_name\"].services[\"$service\"].command" "$CONFIG_FILE")"
+    tmux send-keys -t "$session_name:1" "echo \"  - $service: $command\"" C-m
+  done
+  
+  tmux send-keys -t "$session_name:1" "echo -e \"\\nTmux Keyboard Shortcuts:\\n  - Ctrl+b, arrow keys: Navigate between panes\\n  - Ctrl+b, z: Zoom in/out of current pane\\n  - Ctrl+b, d: Detach from session\\n  - Ctrl+b, 0-9: Switch to window number\\n  - Ctrl+b, c: Create new window\\n\\nTo reattach later: tmux attach-session -t $session_name\\n\"" C-m
+  
+  # Switch back to first window
+  tmux select-window -t "$session_name:0"
+  
+  # Attach to the session
+  tmux attach-session -t "$session_name"
+}
+
+# Print help
+show_help() {
+  echo "Cloud Project Manager - A tool for managing multi-service projects"
+  echo ""
+  echo "Usage:"
+  echo "  cloud [list]                           List all projects"
+  echo "  cloud new <project>                    Create a new project"
+  echo "  cloud services <project>               List services for a project"
+  echo "  cloud service-add <project>            Add a service to a project"
+  echo "  cloud service-remove <project>:<service>  Remove a service from a project"
+  echo "  cloud service-edit <project>:<service>    Edit a service"
+  echo "  cloud run <project> [<project>:<service> ...]  Run all or specific services of a project"
+  echo "  cloud help                             Show this help message"
+  echo ""
+  echo "Examples:"
+  echo "  cloud new client-name                       Create a new project called 'client-name'"
+  echo "  cloud service-add client-name               Add a service to 'client-name' project"
+  echo "  cloud run client-name                       Run all services for 'client-name'"
+  echo "  cloud run client-name client-name:api client-name:frontend  Run only api and frontend services"
+}
+
+# Main function
+main() {
+  check_dependencies
+  init_config
+  
+  local command="$1"
+  shift || true
+
+  case "$command" in
+    ""|"list")
+      list_projects
+      ;;
+    "new")
+      create_project "$1"
+      ;;
+    "services")
+      list_services "$1"
+      ;;
+    "service-add")
+      add_service "$1"
+      ;;
+    "service-remove")
+      remove_service "$1"
+      ;;
+    "service-edit")
+      edit_service "$1"
+      ;;
+    "run")
+      run_project "$@"
+      ;;
+    "help"|"--help"|"-h")
+      show_help
+      ;;
+    *)
+      echo "Unknown command: $command"
+      show_help
+      exit 1
+      ;;
+  esac
+}
+
+# Execute main with all arguments
+main "$@"
