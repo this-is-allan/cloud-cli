@@ -1,9 +1,3 @@
-Aqui está um README.md em inglês para o seu projeto:
-
-⸻
-
-
-
 # 🌩️ Cloud CLI - Multi-Service Project Management
 
 A powerful Bash script for managing projects and services via the command line. This tool provides an intuitive and efficient way to handle multiple projects and services using `tmux`, offering a seamless experience for developers.
@@ -74,7 +68,7 @@ cloud run <project> <project>:<service1> <project>:<service2>
 📌 Installation
 	1.	Clone this repository:
 
-git clone https://github.com/your-username/cloud-cli.git
+git clone https://github.com/this-is-allan/cloud-cli.git
 
 
 	2.	Make the script executable:
@@ -93,7 +87,6 @@ sudo mv cloud /usr/local/bin/
 Ensure you have the following dependencies installed:
 	•	bash
 	•	tmux
-	•	jq (for JSON processing)
 
 📖 Usage
 
@@ -110,7 +103,3 @@ Contributions are welcome! Feel free to open an issue or submit a pull request.
 📜 License
 
 This project is licensed under the MIT License.
-
----
-
-Esse README fornece uma documentação clara e objetiva sobre o projeto. Se precisar de ajustes, posso personalizar conforme suas preferências! 🚀
